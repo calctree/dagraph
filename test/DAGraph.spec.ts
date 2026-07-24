@@ -16,12 +16,43 @@ describe('DAGraph', () => {
       expect([...dag.nodes()]).toIncludeSameMembers([node1, node2, node3]);
     });
 
+    test('should NOT throw on a cycle during construction (deferred check)', () => {
+      const dag = createDAG();
+      const node1 = aNode();
+      const node2 = aNode();
+
+      // Unlike upstream, addEdge never throws — cycle detection is deferred to
+      // assertAcyclic().
+      expect(() => dag.addEdge(node1, node2).addEdge(node2, node1)).not.toThrow();
+    });
+  });
+
+  describe('assertAcyclic', () => {
+    test('should not throw for an acyclic graph', () => {
+      const dag = createDAG();
+      const node1 = aNode();
+      const node2 = aNode();
+      const node3 = aNode();
+      dag.addEdge(node1, node2);
+      dag.addEdge(node2, node3);
+
+      expect(() => dag.assertAcyclic()).not.toThrow();
+    });
+
+    test('should not throw for an empty graph', () => {
+      const dag = createDAG();
+
+      expect(() => dag.assertAcyclic()).not.toThrow();
+    });
+
     test('should detect a direct cycle and throw', () => {
       const dag = createDAG();
       const node1 = aNode();
       const node2 = aNode();
 
-      expect(() => dag.addEdge(node1, node2).addEdge(node2, node1)).toThrow(/cycle/);
+      dag.addEdge(node1, node2).addEdge(node2, node1);
+
+      expect(() => dag.assertAcyclic()).toThrow(/cycle/);
     });
 
     test('should detect an indirect cycle', () => {
@@ -32,14 +63,21 @@ describe('DAGraph', () => {
       const node4 = aNode();
       const node5 = aNode();
 
-      expect(() =>
-        dag
-          .addEdge(node1, node2)
-          .addEdge(node2, node3)
-          .addEdge(node3, node4)
-          .addEdge(node4, node5)
-          .addEdge(node5, node2)
-      ).toThrow(/cycle/);
+      dag.addEdge(node1, node2).addEdge(node2, node3).addEdge(node3, node4).addEdge(node4, node5).addEdge(node5, node2);
+
+      expect(() => dag.assertAcyclic()).toThrow(/cycle/);
+    });
+
+    test('should attribute the cycle to the first edge that closes it', () => {
+      const dag = createDAG();
+      const a: Identifiable = { id: 'a' };
+      const b: Identifiable = { id: 'b' };
+      const c: Identifiable = { id: 'c' };
+
+      // a -> b -> c, then the closing edge c -> a.
+      dag.addEdge(a, b).addEdge(b, c).addEdge(c, a);
+
+      expect(() => dag.assertAcyclic()).toThrow('[c] -> [a] form a cycle');
     });
   });
 

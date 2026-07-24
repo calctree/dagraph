@@ -1,5 +1,48 @@
+/**
+ * CalcTree fork of @sha1n/dagraph (https://github.com/sha1n/dagraph),
+ * originally by Shai Nagar, used under the MIT License (see LICENSE).
+ *
+ * The upstream `addEdge` runs a full Kahn's-algorithm `isAcyclic()` sweep over
+ * the whole graph on EVERY edge insertion, making graph construction
+ * O(E·(V+E)). This fork inserts edges unchecked and runs the cycle check once,
+ * via `assertAcyclic()`, after the graph is built — O(V+E) — while preserving
+ * every observable of the pre-0.2.0 (0.1.0) behavior:
+ *   - `topologicalSort()` ordering, INCLUDING tie-breaks between independent
+ *     siblings (load-bearing for CalcTree: duplicate named values resolve
+ *     last-write-wins in this order).
+ *   - `reverse()` node-insertion order is pinned to 0.1.0's interleaved
+ *     construction, NOT the upstream 0.2.0 refactor (PR sha1n/dagraph#60),
+ *     which reorders siblings and would change reversed-graph sort order.
+ *   - On a cyclic graph, `assertAcyclic()` throws the same
+ *     `"[a] -> [b] form a cycle"` message, attributed (via binary search over
+ *     the edge log, in O(log E) checks) to the same edge the per-edge check
+ *     would have flagged.
+ *
+ * The `traverse`/visitor API and `lib/formatVisitors` are kept verbatim from
+ * upstream.
+ */
 interface Identifiable {
   readonly id: string;
+}
+
+/**
+ * The structural surface of a graph produced by {@link createDAG}.
+ *
+ * `assertAcyclic` is REQUIRED, not optional: the recursive `topologicalSort`
+ * marks nodes visited AFTER recursing, so a cycle that reaches it recurses
+ * unboundedly (stack overflow) rather than throwing. Callers must be able to
+ * validate acyclicity explicitly after construction.
+ */
+interface CalcDag<T extends Identifiable> {
+  addNode(data: T): unknown;
+  getNode(id: string): T | undefined;
+  addEdge(from: T, to: T): unknown;
+  topologicalSort(): Iterable<T>;
+  roots(): Iterable<T>;
+  nodes(): Iterable<T>;
+  reverse(): CalcDag<T>;
+  /** Throws `Error("[a] -> [b] form a cycle")` if the graph is cyclic. */
+  assertAcyclic(): void;
 }
 
 /**
@@ -36,8 +79,14 @@ class Node<T extends Identifiable> {
   }
 }
 
-class DAGraph<T extends Identifiable> {
+class DAGraph<T extends Identifiable> implements CalcDag<T> {
   private readonly nodesById = new Map<string, Node<T>>();
+  // Edge endpoints (from-id, to-id) in insertion order — consumed only by
+  // assertAcyclic's error path to attribute a cycle to the same edge the
+  // per-edge check would have flagged. Ids only, NOT the full `T` node
+  // objects: acyclicity of a prefix depends solely on ids, and retaining full
+  // node payloads here would keep them alive for an error-only path.
+  private readonly edgeLog: Array<readonly [string, string]> = [];
 
   /**
    * Adds the specified identifiable node to the graph.
@@ -57,18 +106,58 @@ class DAGraph<T extends Identifiable> {
 
   /**
    * Adds an edge pointing from 'from' to 'to'.
+   *
+   * Unlike upstream this does NOT check for cycles — call {@link assertAcyclic}
+   * once after construction.
    */
   addEdge(from: T, to: T): DAGraph<T> {
     const fromNode = this.ensureNode(from);
     const toNode = this.ensureNode(to);
 
     toNode.dependencies.add(fromNode.id);
-
-    if (!this.isAcyclic()) {
-      throw new Error(`[${from.id}] -> [${to.id}] form a cycle`);
-    }
+    this.edgeLog.push([fromNode.id, toNode.id]);
 
     return this;
+  }
+
+  /**
+   * Throws `Error("[a] -> [b] form a cycle")` — same message, same edge
+   * attribution as the upstream per-edge check — if the graph is cyclic.
+   *
+   * Upstream flagged the FIRST edge (in insertion order) whose addition closed
+   * a cycle. Cyclicity is monotone in prefix length (edges are only added,
+   * never removed), so that edge is the boundary of the smallest cyclic prefix
+   * — found by binary search in O(log E) cycle checks rather than a linear
+   * replay.
+   */
+  assertAcyclic(): void {
+    if (this.isAcyclic()) return;
+    // Whole graph is cyclic, so some prefix boundary closed the first cycle.
+    // Invariant across the search: prefix of length `hi` is cyclic, prefix of
+    // length `lo - 1` is acyclic.
+    const log = this.edgeLog;
+    let lo = 1;
+    let hi = log.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (DAGraph.prefixHasCycle(log, mid)) hi = mid;
+      else lo = mid + 1;
+    }
+    const [from, to] = log[lo - 1];
+    throw new Error(`[${from}] -> [${to}] form a cycle`);
+  }
+
+  /**
+   * Whether the sub-graph formed by the first `count` logged edges (insertion
+   * order) contains a cycle. Rebuilt from ids alone via the same addEdge /
+   * isAcyclic path the real graph uses.
+   */
+  private static prefixHasCycle(log: ReadonlyArray<readonly [string, string]>, count: number): boolean {
+    const g = new DAGraph<Identifiable>();
+    for (let i = 0; i < count; i++) {
+      g.addEdge({ id: log[i][0] }, { id: log[i][1] });
+    }
+    return !g.isAcyclic();
   }
 
   /**
@@ -124,16 +213,19 @@ class DAGraph<T extends Identifiable> {
    * @returns a DAGraph
    */
   reverse(): DAGraph<T> {
+    // Pinned to 0.1.0's interleaved construction (addNode + addEdge per
+    // dependency), NOT the 0.2.0 refactor (sha1n/dagraph#60) that adds all
+    // nodes first. The two produce the same reversed edge set but different
+    // node-insertion order, which changes topological-sort tie-breaks — a
+    // load-bearing observable for CalcTree.
     const reverseGraph = new DAGraph<T>();
 
     for (const node of this.nodesById.values()) {
       reverseGraph.addNode(node.data);
-    }
-
-    for (const node of this.nodesById.values()) {
-      for (const dependencyId of node.dependencies) {
-        const dependencyNode = reverseGraph.nodesById.get(dependencyId);
-        dependencyNode!.dependencies.add(node.id);
+      for (const dependency of node.dependencies) {
+        const depData = this.nodesById.get(dependency)!.data;
+        reverseGraph.addNode(depData);
+        reverseGraph.addEdge(node.data, depData);
       }
     }
 
@@ -213,9 +305,13 @@ class DAGraph<T extends Identifiable> {
     });
 
     let visitedNodeCount = 0;
+    // Head index instead of the O(n) `queue.splice(0, 1)`; the boolean outcome
+    // is unaffected by dequeue order.
+    let head = 0;
 
-    while (queue.length > 0) {
-      const [nodeId] = queue.splice(0, 1);
+    while (head < queue.length) {
+      const nodeId = queue[head];
+      head += 1;
       visitedNodeCount += 1;
 
       this.nodesById.get(nodeId)!.dependencies.forEach(child => {
@@ -235,6 +331,6 @@ function createDAG<T extends Identifiable>(): DAGraph<T> {
 }
 
 export * from './lib/formatVisitors';
-export type { DAGraph, Identifiable, DAGVisitor, TraversalState };
+export type { DAGraph, CalcDag, Identifiable, DAGVisitor, TraversalState };
 export default createDAG;
 export { createDAG };

@@ -1,10 +1,13 @@
 {
-  "name": "@sha1n/dagraph",
-  "version": "0.3.2",
+  "name": "@calctree/dagraph",
+  "version": "1.0.0",
   "type": "commonjs",
-  "description": "Directed acyclic graph utility in TypeScript",
-  "repository": "https://github.com/sha1n/dagraph",
-  "author": "Shai Nagar",
+  "description": "Directed acyclic graph utility in TypeScript. Modified fork of @sha1n/dagraph with O(V+E) deferred cycle detection.",
+  "repository": "https://github.com/calctree/dagraph",
+  "author": "CalcTree",
+  "contributors": [
+    "Shai Nagar (original @sha1n/dagraph author)"
+  ],
   "license": "MIT",
   "types": "./dist/types/index.d.ts",
   "exports": [
@@ -49,8 +52,8 @@
   },
   "packageManager": "pnpm@10.28.0",
   "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
+    "access": "restricted",
+    "registry": "https://npm.pkg.github.com"
   },
   "engines": {
     "node": ">= 24"
